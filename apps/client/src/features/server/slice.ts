@@ -8,6 +8,7 @@ import type {
   TCommandsMapByPlugin,
   TExternalStream,
   TExternalStreamsMap,
+  TFileToken,
   TJoinedEmoji,
   TJoinedMessage,
   TJoinedPublicUser,
@@ -24,6 +25,7 @@ import type {
   TVoiceUserState
 } from '@sharkord/shared';
 import { DEFAULT_MESSAGES_LIMIT } from '@sharkord/shared';
+import { applyFileTokens } from './files/helpers';
 import { mergeMessagesChronologically } from './helpers';
 import type {
   TDisconnectInfo,
@@ -453,6 +455,12 @@ export const serverSlice = createSlice({
       state.threadTypingMap[parentMessageId] = typingUsers.filter(
         (id) => id !== userId
       );
+    },
+
+    // FILES ------------------------------------------------------------
+
+    updateFileTokens: (state, action: PayloadAction<TFileToken[]>) => {
+      applyFileTokens(state, action.payload);
     },
 
     // USERS ------------------------------------------------------------

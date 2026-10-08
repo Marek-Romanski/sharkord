@@ -205,7 +205,9 @@ const users = sqliteTable(
   (t) => [
     uniqueIndex('users_identity_idx').on(t.identity),
     index('users_name_idx').on(t.name),
-    index('users_last_login_idx').on(t.lastLoginAt)
+    index('users_last_login_idx').on(t.lastLoginAt),
+    index('users_avatar_idx').on(t.avatarId),
+    index('users_banner_idx').on(t.bannerId)
   ]
 );
 
@@ -392,7 +394,8 @@ const messageReactions = sqliteTable(
     ),
     index('reaction_emoji_idx').on(t.emoji),
     index('reaction_user_idx').on(t.userId),
-    index('reaction_msg_emoji_idx').on(t.messageId, t.emoji)
+    index('reaction_msg_emoji_idx').on(t.messageId, t.emoji),
+    index('reaction_file_idx').on(t.fileId)
   ]
 );
 

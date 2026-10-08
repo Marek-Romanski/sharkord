@@ -3,7 +3,7 @@ import { getFileUrl } from '@/helpers/get-file-url';
 import { cn } from '@/lib/utils';
 import type { TFile } from '@sharkord/shared';
 import { gitHubEmojis } from '@tiptap/extension-emoji';
-import { memo, useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 
 type TEmojiProps = {
   emoji: string;
@@ -30,6 +30,11 @@ const Emoji = memo(
       () => gitHubEmoji?.fallbackImage ?? getFileUrl(file),
       [gitHubEmoji, file]
     );
+
+    // a new url (refreshed token) deserves another try
+    useEffect(() => {
+      setFailed(false);
+    }, [imgSrc]);
 
     if (gitHubEmoji?.emoji && !isTextPresentation(gitHubEmoji.emoji)) {
       return (

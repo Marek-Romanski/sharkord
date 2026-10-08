@@ -1,7 +1,14 @@
-import type { TTempFile } from '@sharkord/shared';
+import {
+  STORAGE_MAX_FILE_TOKENS_PER_REFRESH,
+  type TTempFile
+} from '@sharkord/shared';
 import { beforeEach, describe, expect, test } from 'bun:test';
+import { eq } from 'drizzle-orm';
 import fs from 'fs/promises';
 import { initTest, login, uploadFile } from '../../__tests__/helpers';
+import { tdb } from '../../__tests__/setup';
+import { config } from '../../config';
+import { emojis, messageReactions, settings, users } from '../../db/schema';
 import { fileManager } from '../../helpers/file-manager';
 
 describe('files router', () => {
@@ -131,5 +138,262 @@ describe('files router', () => {
     );
 
     expect(await fs.exists(tempFile.path)).toBe(true);
+  });
+
+  describe('refreshTokens', () => {
+    // seeded channel 1 is public, channel 5 is restricted and user 2 is denied viewing it
+    const PUBLIC_CHANNEL_ID = 1;
+    const RESTRICTED_CHANNEL_ID = 5;
+
+    const enableSignedUrls = () =>
+      tdb.update(settings).set({
+        storageSignedUrlsEnabled: true,
+        storageSignedUrlsTtlSeconds: 3600
+      });
+
+    const sendFileTo = async (channelId: number) => {
+      const { caller, mockedToken } = await initTest();
+
+      const upload = await uploadFile(
+        new File(['refresh'], `refresh-${counter++}.txt`, {
+          type: 'text/plain'
+        }),
+        mockedToken
+      );
+      const uploaded = (await upload.json()) as TTempFile;
+
+      const messageId = await caller.messages.send({
+        channelId,
+        content: 'with a file',
+        files: [uploaded.id]
+      });
+
+      const message = await caller.messages.getOne({ messageId });
+
+      return message.files[0]!.id;
+    };
+
+    test('should return fresh tokens for files the caller can see', async () => {
+      await enableSignedUrls();
+
+      const fileId = await sendFileTo(PUBLIC_CHANNEL_ID);
+      const { caller } = await initTest(2);
+
+      const before = Date.now();
+      const tokens = await caller.files.refreshTokens({ fileIds: [fileId] });
+
+      expect(tokens).toHaveLength(1);
+      expect(tokens[0]!.id).toBe(fileId);
+      expect(tokens[0]!._accessToken).toBeString();
+      expect(tokens[0]!._accessTokenExpiresAt).toBeGreaterThan(
+        before + 3_000_000
+      );
+    });
+
+    test('should not return tokens for files in channels the caller cannot view', async () => {
+      await enableSignedUrls();
+
+      const hiddenFileId = await sendFileTo(RESTRICTED_CHANNEL_ID);
+      const visibleFileId = await sendFileTo(PUBLIC_CHANNEL_ID);
+
+      const { caller: lowPermissionCaller } = await initTest(2);
+      const { caller: admin } = await initTest(1);
+
+      const asUser = await lowPermissionCaller.files.refreshTokens({
+        fileIds: [hiddenFileId, visibleFileId]
+      });
+
+      expect(asUser.map((token) => token.id)).toEqual([visibleFileId]);
+
+      const asAdmin = await admin.files.refreshTokens({
+        fileIds: [hiddenFileId, visibleFileId]
+      });
+
+      expect(asAdmin.map((token) => token.id).sort()).toEqual(
+        [hiddenFileId, visibleFileId].sort()
+      );
+    });
+
+    test('should only return direct message files to the participants', async () => {
+      await enableSignedUrls();
+      await tdb
+        .update(settings)
+        .set({ storageFileSharingInDirectMessages: true });
+
+      const { caller: admin } = await initTest(1);
+      const { channelId } = await admin.dms.open({ userId: 2 });
+      const dmFileId = await sendFileTo(channelId);
+
+      const { caller: participant } = await initTest(2);
+      const { caller: outsider } = await initTest(3);
+
+      const asParticipant = await participant.files.refreshTokens({
+        fileIds: [dmFileId]
+      });
+
+      expect(asParticipant.map((token) => token.id)).toEqual([dmFileId]);
+
+      expect(
+        await outsider.files.refreshTokens({ fileIds: [dmFileId] })
+      ).toEqual([]);
+    });
+
+    test('should not return direct message files when direct messages are disabled', async () => {
+      await enableSignedUrls();
+      await tdb
+        .update(settings)
+        .set({ storageFileSharingInDirectMessages: true });
+
+      const { caller: admin } = await initTest(1);
+      const { channelId } = await admin.dms.open({ userId: 2 });
+      const dmFileId = await sendFileTo(channelId);
+
+      await tdb.update(settings).set({ directMessagesEnabled: false });
+
+      const { caller: participant } = await initTest(2);
+
+      expect(
+        await participant.files.refreshTokens({ fileIds: [dmFileId] })
+      ).toEqual([]);
+    });
+
+    test('should return tokens for banners, the logo, emojis and reaction files to any user', async () => {
+      await enableSignedUrls();
+
+      const { caller: admin, mockedToken } = await initTest(1);
+
+      const uploadFileId = async (name: string) => {
+        const upload = await uploadFile(
+          new File([name], `${name}.png`, { type: 'image/png' }),
+          mockedToken
+        );
+
+        return ((await upload.json()) as TTempFile).id;
+      };
+
+      await admin.users.changeBanner({ fileId: await uploadFileId('banner') });
+      await admin.others.changeLogo({ fileId: await uploadFileId('logo') });
+      await admin.emojis.add([
+        { fileId: await uploadFileId('emoji'), name: 'token_emoji' }
+      ]);
+
+      const messageId = await admin.messages.send({
+        channelId: PUBLIC_CHANNEL_ID,
+        content: 'react to me',
+        files: []
+      });
+
+      await admin.messages.toggleReaction({
+        messageId,
+        emoji: 'token_emoji'
+      });
+
+      const owner = await tdb
+        .select({ bannerId: users.bannerId })
+        .from(users)
+        .where(eq(users.id, 1))
+        .get();
+      const server = await tdb
+        .select({ logoId: settings.logoId })
+        .from(settings)
+        .get();
+      const emoji = await tdb
+        .select({ fileId: emojis.fileId })
+        .from(emojis)
+        .get();
+      const reaction = await tdb
+        .select({ fileId: messageReactions.fileId })
+        .from(messageReactions)
+        .get();
+
+      const expectedIds = [
+        owner!.bannerId!,
+        server!.logoId!,
+        emoji!.fileId,
+        reaction!.fileId!
+      ];
+
+      const { caller } = await initTest(3);
+      const tokens = await caller.files.refreshTokens({ fileIds: expectedIds });
+
+      expect(tokens.map((token) => token.id).sort()).toEqual(
+        Array.from(new Set(expectedIds)).sort()
+      );
+    });
+
+    test('should return tokens for avatars to any user', async () => {
+      await enableSignedUrls();
+
+      const { caller: admin, mockedToken } = await initTest(1);
+
+      const upload = await uploadFile(
+        new File(['avatar'], 'avatar.png', { type: 'image/png' }),
+        mockedToken
+      );
+      const uploaded = (await upload.json()) as TTempFile;
+
+      await admin.users.changeAvatar({ fileId: uploaded.id });
+
+      const owner = await tdb
+        .select({ avatarId: users.avatarId })
+        .from(users)
+        .where(eq(users.id, 1))
+        .get();
+
+      const { caller } = await initTest(2);
+      const tokens = await caller.files.refreshTokens({
+        fileIds: [owner!.avatarId!]
+      });
+
+      expect(tokens.map((token) => token.id)).toEqual([owner!.avatarId!]);
+    });
+
+    test('should ignore ids that are not files', async () => {
+      await enableSignedUrls();
+
+      const { caller } = await initTest(2);
+
+      expect(await caller.files.refreshTokens({ fileIds: [999999] })).toEqual(
+        []
+      );
+    });
+
+    test('should return nothing when signed urls are disabled', async () => {
+      const fileId = await sendFileTo(PUBLIC_CHANNEL_ID);
+      const { caller } = await initTest(2);
+
+      expect(await caller.files.refreshTokens({ fileIds: [fileId] })).toEqual(
+        []
+      );
+    });
+
+    test('should rate limit excessive refreshes', async () => {
+      const { caller } = await initTest(2);
+
+      for (
+        let i = 0;
+        i < config.rateLimiters.refreshFileTokens.maxRequests;
+        i++
+      ) {
+        await caller.files.refreshTokens({ fileIds: [] });
+      }
+
+      await expect(caller.files.refreshTokens({ fileIds: [] })).rejects.toThrow(
+        'Too many requests. Please try again shortly.'
+      );
+    });
+
+    test('should reject more ids than one refresh may carry', async () => {
+      const { caller } = await initTest(2);
+
+      await expect(
+        caller.files.refreshTokens({
+          fileIds: Array.from(
+            { length: STORAGE_MAX_FILE_TOKENS_PER_REFRESH + 1 },
+            (_, index) => index + 1
+          )
+        })
+      ).rejects.toThrow('expected array to have <=200 items');
+    });
   });
 });

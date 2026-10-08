@@ -80,6 +80,7 @@ const zConfig = z.object({
     toggleMessageReaction: zRateLimiter,
     addEmoji: zRateLimiter,
     openDirectMessage: zRateLimiter,
+    refreshFileTokens: zRateLimiter,
     handshake: zRateLimiter,
     updatePassword: zRateLimiter,
     adminCreate: zRateLimiter,
@@ -177,6 +178,10 @@ const defaultConfig: TConfig = {
     },
     openDirectMessage: {
       maxRequests: 10,
+      windowMs: 60_000
+    },
+    refreshFileTokens: {
+      maxRequests: 30,
       windowMs: 60_000
     },
     handshake: {

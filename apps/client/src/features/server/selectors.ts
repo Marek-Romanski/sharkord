@@ -58,6 +58,9 @@ export const serverNameSelector = (state: IRootState) =>
 export const publicServerSettingsSelector = (state: IRootState) =>
   state.server.publicSettings;
 
+export const signedUrlsEnabledSelector = (state: IRootState) =>
+  !!state.server.publicSettings?.storageSignedUrlsEnabled;
+
 export const pluginsEnabledSelector = (state: IRootState) =>
   !!state.server.publicSettings?.enablePlugins;
 

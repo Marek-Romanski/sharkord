@@ -9,6 +9,7 @@ import { VoiceProvider } from '@/components/voice-provider';
 import { useSelectedDmChannelId, useThreadSidebar } from '@/features/app/hooks';
 import { setDmsOpen } from '@/features/server/actions';
 import { setSelectedChannelId } from '@/features/server/channels/actions';
+import { useFileTokenRefresh } from '@/features/server/files/hooks';
 import { useDmsOpen, usePublicServerSettings } from '@/features/server/hooks';
 import {
   getLocalStorageItemBool,
@@ -33,6 +34,8 @@ const ServerView = memo(() => {
   const publicSettings = usePublicServerSettings();
   const previousServerChannelIdRef = useRef<number | undefined>(undefined);
   const { isOpen: isThreadSidebarOpen } = useThreadSidebar();
+
+  useFileTokenRefresh();
 
   const handleDesktopRightSidebarToggle = useCallback(() => {
     setIsDesktopRightSidebarOpen((prev) => !prev);

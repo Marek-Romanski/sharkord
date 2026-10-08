@@ -37,6 +37,10 @@ const ImageOverride = memo(({ src, alt }: TImageOverrideProps) => {
     }, 0);
   }, []);
 
+  useEffect(() => {
+    setError(false);
+  }, [src]);
+
   if (error) return null;
 
   return (

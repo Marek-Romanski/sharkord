@@ -1,10 +1,11 @@
 import type { TEmojiItem } from '@/components/tiptap-input/helpers';
+import { useCustomEmojis } from '@/features/server/emojis/hooks';
 import {
   getLocalStorageItemAsJSON,
   LocalStorageKey,
   setLocalStorageItemAsJSON
 } from '@/helpers/storage';
-import { useCallback, useSyncExternalStore } from 'react';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
 
 const MAX_RECENT_EMOJIS = 32;
 
@@ -72,11 +73,35 @@ const getSnapshot = (): TEmojiItem[] => {
   return loadRecentEmojis();
 };
 
+// the list is kept in local storage together with the url the emoji had when it was picked,
+// and for a signed url that token is long expired. custom emoji are looked up again by name
+const withFreshCustomEmojis = (
+  recentEmojis: TEmojiItem[],
+  customEmojis: TEmojiItem[]
+): TEmojiItem[] => {
+  const customByName = new Map(
+    customEmojis.map((emoji) => [emoji.name, emoji])
+  );
+
+  return recentEmojis.map((recent) => {
+    const fresh = recent.emoji ? undefined : customByName.get(recent.name);
+
+    return fresh ? { ...recent, fallbackImage: fresh.fallbackImage } : recent;
+  });
+};
+
 const useRecentEmojis = () => {
-  const recentEmojis = useSyncExternalStore(
+  const storedRecentEmojis = useSyncExternalStore(
     subscribe,
     getSnapshot,
     getSnapshot
+  );
+
+  const customEmojis = useCustomEmojis();
+
+  const recentEmojis = useMemo(
+    () => withFreshCustomEmojis(storedRecentEmojis, customEmojis),
+    [storedRecentEmojis, customEmojis]
   );
 
   const addRecent = useCallback((emoji: TEmojiItem) => {
@@ -89,4 +114,4 @@ const useRecentEmojis = () => {
   };
 };
 
-export { addRecentEmoji, useRecentEmojis };
+export { addRecentEmoji, useRecentEmojis, withFreshCustomEmojis };

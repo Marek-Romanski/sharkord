@@ -31,6 +31,9 @@ export type TFile = InferSelectModel<typeof files> & {
   _accessToken?: string;
   _accessTokenExpiresAt?: number;
 };
+export type TFileToken = Required<
+  Pick<TFile, 'id' | '_accessToken' | '_accessTokenExpiresAt'>
+>;
 export type TUser = InferSelectModel<typeof users>;
 export type TLogin = InferSelectModel<typeof logins>;
 export type TMessage = InferSelectModel<typeof messages>;

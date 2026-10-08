@@ -1,7 +1,10 @@
 import { ChannelChip } from '@/components/channel-chip';
+import { customEmojiFileByNameSelector } from '@/features/server/emojis/selectors';
+import { store } from '@/features/store';
 import { parseDomCommand } from '@sharkord/shared';
 import { Element, type DOMNode } from 'html-react-parser';
 import { CommandOverride } from '../overrides/command';
+import { EmojiOverride } from '../overrides/emoji';
 import { MentionOverride } from '../overrides/mention';
 import { YoutubeOverride } from '../overrides/youtube';
 import { getYoutubeInfo } from './helpers';
@@ -34,6 +37,17 @@ const serializer = (domNode: DOMNode, messageId: number) => {
 
       if (!Number.isNaN(userId)) {
         return <MentionOverride userId={userId} />;
+      }
+    } else if (
+      domNode instanceof Element &&
+      domNode.name === 'span' &&
+      domNode.attribs['data-type'] === 'emoji' &&
+      domNode.attribs['data-name']
+    ) {
+      const name = domNode.attribs['data-name'];
+
+      if (customEmojiFileByNameSelector(store.getState(), name)) {
+        return <EmojiOverride name={name} />;
       }
     } else if (
       domNode instanceof Element &&

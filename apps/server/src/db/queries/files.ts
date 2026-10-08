@@ -1,8 +1,9 @@
 import type { TFile, TPluginStorageUsage } from '@sharkord/shared';
-import { desc, eq, sql, sum } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql, sum } from 'drizzle-orm';
 import { db } from '..';
 import { attachFileToken } from '../../helpers/files-crypto';
-import { files, messageFiles } from '../schema';
+import { files, messageFiles, messageReactions, messages } from '../schema';
+import { getChannelsForUser } from './channels';
 import { getSettings } from './server';
 
 const getExceedingOldFiles = async (newFileSize: number) => {
@@ -104,6 +105,67 @@ const getFilesByUserId = async (
   return results;
 };
 
+// files a user may be handed a token for: server wide files (avatars, banners, emojis, the
+// logo) and files attached to messages in channels the user can view
+const getAccessibleFileIds = async (
+  userId: number,
+  fileIds: number[],
+  directMessagesEnabled: boolean
+): Promise<number[]> => {
+  if (fileIds.length === 0) return [];
+
+  const accessibleChannelIds = (await getChannelsForUser(userId))
+    .filter((channel) => directMessagesEnabled || !channel.isDm)
+    .map((channel) => channel.id);
+
+  const [serverWideRows, attachedRows, reactionRows] = await Promise.all([
+    db.all<{ id: number }>(sql`
+      SELECT files.id
+      FROM files
+      WHERE ${inArray(files.id, fileIds)}
+      AND (
+        EXISTS (SELECT 1 FROM users u WHERE u.avatar_id = files.id OR u.banner_id = files.id)
+        OR EXISTS (SELECT 1 FROM emojis e WHERE e.file_id = files.id)
+        OR EXISTS (SELECT 1 FROM settings s WHERE s.logo_id = files.id)
+      )
+    `),
+    accessibleChannelIds.length === 0
+      ? []
+      : db
+          .select({ fileId: messageFiles.fileId })
+          .from(messageFiles)
+          .innerJoin(messages, eq(messages.id, messageFiles.messageId))
+          .where(
+            and(
+              inArray(messageFiles.fileId, fileIds),
+              inArray(messages.channelId, accessibleChannelIds)
+            )
+          )
+          .all(),
+    accessibleChannelIds.length === 0
+      ? []
+      : db
+          .select({ fileId: messageReactions.fileId })
+          .from(messageReactions)
+          .innerJoin(messages, eq(messages.id, messageReactions.messageId))
+          .where(
+            and(
+              inArray(messageReactions.fileId, fileIds),
+              inArray(messages.channelId, accessibleChannelIds)
+            )
+          )
+          .all()
+  ]);
+
+  const accessibleIds = new Set<number>([
+    ...serverWideRows.map((row) => row.id),
+    ...attachedRows.map((row) => row.fileId),
+    ...reactionRows.flatMap((row) => (row.fileId === null ? [] : [row.fileId]))
+  ]);
+
+  return Array.from(accessibleIds);
+};
+
 const getUsedFileQuota = async (): Promise<number> => {
   const result = await db
     .select({
@@ -192,6 +254,7 @@ const isFileOrphaned = async (fileId: number): Promise<boolean> => {
 };
 
 export {
+  getAccessibleFileIds,
   getExceedingOldFiles,
   getFilesByMessageId,
   getFilesByUserId,

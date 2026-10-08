@@ -253,6 +253,13 @@
       "when": 1788517601742,
       "tag": "0035_grant_send_voice_reaction",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1791461994595,
+      "tag": "0036_file_token_indexes",
+      "breakpoints": true
     }
   ]
 }
