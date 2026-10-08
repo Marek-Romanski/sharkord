@@ -141,6 +141,41 @@ describe('/public', () => {
     }
   });
 
+  test('should still serve files saved under an old style name', async () => {
+    // files from before opaque names keep their name, nothing renames them
+    const legacyName = 'legacy-notes.txt';
+    const legacyPath = path.join(PUBLIC_PATH, legacyName);
+
+    await fs.writeFile(legacyPath, 'old upload');
+
+    const legacyFile = await tdb
+      .insert(files)
+      .values({
+        name: legacyName,
+        originalName: legacyName,
+        md5: 'legacy',
+        size: 10,
+        mimeType: 'text/plain',
+        extension: '.txt',
+        createdAt: Date.now()
+      })
+      .returning()
+      .get();
+
+    await tdb
+      .insert(messageFiles)
+      .values({ messageId: 1, fileId: legacyFile.id, createdAt: Date.now() });
+
+    try {
+      const response = await fetch(`${testsBaseUrl}/public/${legacyName}`);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe('old upload');
+    } finally {
+      await fs.rm(legacyPath, { force: true });
+    }
+  });
+
   test('should serve a file successfully', async () => {
     const file = filesToCreate[0];
 
@@ -163,9 +198,11 @@ describe('/public', () => {
     );
     const disposition = response.headers.get('Content-Disposition');
 
-    expect(disposition).toInclude(`filename="${dbFile!.name}"`);
+    // the url carries no file name, the download name comes from the header
+    expect(dbFile!.name).not.toContain(dbFile!.originalName);
+    expect(disposition).toInclude(`filename="${dbFile!.originalName}"`);
     expect(disposition).toInclude(
-      `filename*=UTF-8''${encodeURIComponent(dbFile!.name)}`
+      `filename*=UTF-8''${encodeURIComponent(dbFile!.originalName)}`
     );
 
     const responseText = await response.text();

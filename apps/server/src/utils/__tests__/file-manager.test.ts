@@ -22,6 +22,10 @@ import { fileManager } from '../../helpers/file-manager';
 import { PUBLIC_PATH, TMP_PATH, UPLOADS_PATH } from '../../helpers/paths';
 import { pluginManager } from '../../plugins';
 
+// stored names are public urls, so they must reveal nothing about the file but its plain
+// extension, and not be guessable
+const OPAQUE_NAME = /^[0-9a-f]{64}(\.[a-z0-9]{1,16})?$/;
+
 const UNCOMPRESSED_PNG_PATH = path.join(
   __dirname,
   '../../__tests__/mocks/uncompressed.png'
@@ -210,7 +214,8 @@ describe('file manager', () => {
 
     expect(savedFile).toBeDefined();
     expect(savedFile.id).toBeGreaterThan(0);
-    expect(savedFile.name).toBe(testFileName);
+    expect(savedFile.name).toMatch(OPAQUE_NAME);
+    expect(savedFile.name).not.toContain(testFileName);
     expect(savedFile.originalName).toBe(testFileName);
     expect(savedFile.extension).toBe('.txt');
     expect(savedFile.size).toBe(stats.size);
@@ -264,7 +269,7 @@ describe('file manager', () => {
 
     tempFilesToCleanup.push(path.join(PUBLIC_PATH, savedFile.name));
 
-    expect(savedFile.name).toBe('disabled.png');
+    expect(savedFile.name).toMatch(OPAQUE_NAME);
     expect(savedFile.originalName).toBe('disabled.png');
     expect(savedFile.extension).toBe('.png');
     expect(savedFile.size).toBe(stats.size);
@@ -295,7 +300,7 @@ describe('file manager', () => {
 
     tempFilesToCleanup.push(path.join(PUBLIC_PATH, savedFile.name));
 
-    expect(savedFile.name).toBe('optimized.webp');
+    expect(savedFile.name).toMatch(OPAQUE_NAME);
     expect(savedFile.originalName).toBe('optimized.webp');
     expect(savedFile.extension).toBe('.webp');
     expect(savedFile.mimeType).toBe('image/webp');
@@ -325,7 +330,7 @@ describe('file manager', () => {
 
     tempFilesToCleanup.push(path.join(PUBLIC_PATH, savedFile.name));
 
-    expect(savedFile.name).toBe('not-image.txt');
+    expect(savedFile.name).toMatch(OPAQUE_NAME);
     expect(savedFile.extension).toBe('.txt');
     expect(savedFile.size).toBe(stats.size);
   });
@@ -806,7 +811,7 @@ describe('file manager', () => {
     expect(path1).not.toBe(path3);
   });
 
-  test('should append counter when same original name already exists', async () => {
+  test('should give two uploads with the same name different stored names', async () => {
     const fileAPath = path.join(UPLOADS_PATH, `dup-${Date.now()}.txt`);
 
     await fs.writeFile(fileAPath, 'first');
@@ -841,8 +846,11 @@ describe('file manager', () => {
 
     tempFilesToCleanup.push(path.join(PUBLIC_PATH, savedB.name));
 
-    expect(savedA.name).toBe('my-file.txt');
-    expect(savedB.name).toBe('my-file-2.txt');
+    expect(savedA.name).toMatch(OPAQUE_NAME);
+    expect(savedB.name).toMatch(OPAQUE_NAME);
+    expect(savedB.name).not.toBe(savedA.name);
+    expect(savedA.originalName).toBe('my-file.txt');
+    expect(savedB.originalName).toBe('my-file.txt');
 
     const dbA = await tdb
       .select()
@@ -857,9 +865,9 @@ describe('file manager', () => {
       .get();
 
     expect(dbA).toBeDefined();
-    expect(dbA?.name).toBe('my-file.txt');
+    expect(dbA?.name).toBe(savedA.name);
     expect(dbB).toBeDefined();
-    expect(dbB?.name).toBe('my-file-2.txt');
+    expect(dbB?.name).toBe(savedB.name);
   });
 
   test('temporaryFileExists returns correct boolean', async () => {
@@ -954,6 +962,8 @@ describe('file manager', () => {
     tempFilesToCleanup.push(path.join(PUBLIC_PATH, savedFile.name));
 
     expect(savedFile.extension).toBe('.png');
+    expect(savedFile.mimeType).toBe('image/png');
+    expect(savedFile.name).toMatch(OPAQUE_NAME);
     expect(savedFile.name).toEndWith('.png');
 
     const dbFile = await tdb
@@ -973,7 +983,44 @@ describe('file manager', () => {
     expect(p).not.toContain('.JPEG');
   });
 
-  test('should handle duplicate names with uppercase extensions', async () => {
+  test('should keep a clean extension in the stored name and drop anything odd', async () => {
+    const cases = [
+      { originalName: 'photo.png', suffix: '.png' },
+      { originalName: 'PHOTO.JPG', suffix: '.jpg' },
+      { originalName: 'archive.tar.gz', suffix: '.gz' },
+      { originalName: 'no-extension', suffix: '' },
+      { originalName: 'odd.jp g', suffix: '' },
+      { originalName: 'dash.p-g', suffix: '' },
+      { originalName: 'long.abcdefghijklmnopq', suffix: '' }
+    ];
+
+    for (const { originalName, suffix } of cases) {
+      const filePath = path.join(
+        UPLOADS_PATH,
+        `ext-${Date.now()}-${Math.random()}`
+      );
+
+      await fs.writeFile(filePath, 'content');
+
+      const stats = await fs.stat(filePath);
+
+      const tempFile = await fileManager.addTemporaryFile({
+        filePath,
+        size: stats.size,
+        originalName,
+        userId: 1
+      });
+
+      const savedFile = await fileManager.saveFile(tempFile.id, 1);
+
+      tempFilesToCleanup.push(path.join(PUBLIC_PATH, savedFile.name));
+
+      expect(savedFile.name).toMatch(OPAQUE_NAME);
+      expect(savedFile.name.slice(64)).toBe(suffix);
+    }
+  });
+
+  test('should store uppercase extensions as opaque names with the right mime type', async () => {
     const file1Path = path.join(UPLOADS_PATH, `dup-uc-${Date.now()}.txt`);
     const file2Path = path.join(UPLOADS_PATH, `dup-uc2-${Date.now()}.txt`);
 
@@ -1005,8 +1052,11 @@ describe('file manager', () => {
 
     tempFilesToCleanup.push(path.join(PUBLIC_PATH, saved2.name));
 
-    expect(saved1.name).toBe('report.txt');
-    expect(saved2.name).toBe('report-2.txt');
+    expect(saved1.name).toMatch(OPAQUE_NAME);
+    expect(saved2.name).toMatch(OPAQUE_NAME);
+    expect(saved2.name).not.toBe(saved1.name);
+    expect(saved1.extension).toBe('.txt');
+    expect(saved1.mimeType).toContain('text/plain');
   });
 });
 

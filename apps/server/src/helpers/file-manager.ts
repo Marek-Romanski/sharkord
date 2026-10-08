@@ -11,8 +11,7 @@ import {
   type TTempFile
 } from '@sharkord/shared';
 import { randomUUIDv7 } from 'bun';
-import { createHash } from 'crypto';
-import { eq } from 'drizzle-orm';
+import { createHash, randomBytes } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import { db } from '../db';
@@ -54,6 +53,17 @@ const md5File = async (path: string): Promise<string> => {
   hash.update(file);
 
   return hash.digest('hex');
+};
+
+const SAFE_EXTENSION = /^\.[a-z0-9]{1,16}$/;
+
+// the name is the public url, so it is long and random: knowing the original name or an
+// earlier url gives no way to find another file. the extension is only there so saving or
+// dragging a file out keeps a usable name, anything odd in it is dropped
+const generateStoredName = (originalName: string) => {
+  const extension = getNormalizedExtension(originalName);
+
+  return `${randomBytes(32).toString('hex')}${SAFE_EXTENSION.test(extension) ? extension : ''}`;
 };
 
 const moveFile = async (src: string, dest: string) => {
@@ -324,32 +334,6 @@ class FileManager {
     }
   };
 
-  private getUniqueName = async (originalName: string): Promise<string> => {
-    const baseName = path.basename(originalName, path.extname(originalName));
-    const extension = getNormalizedExtension(originalName);
-
-    let fileName = `${baseName}${extension}`;
-    let counter = 2;
-
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const existingFile = await db
-        .select()
-        .from(files)
-        .where(eq(files.name, fileName))
-        .get();
-
-      if (!existingFile) {
-        break;
-      }
-
-      fileName = `${baseName}-${counter}${extension}`;
-      counter++;
-    }
-
-    return fileName;
-  };
-
   private runBeforeFileSaveHooks = async (
     tempFile: TTempFile,
     userId: number | null,
@@ -415,13 +399,16 @@ class FileManager {
 
     await this.handleStorageLimits(tempFile, settings);
 
-    const fileName = await this.getUniqueName(tempFile.originalName);
+    const fileName = generateStoredName(tempFile.originalName);
     const destinationPath = path.join(PUBLIC_PATH, fileName);
+
+    // the stored name can drop an unsafe extension, the normalized one is the source. it has
+    // to be lowercase, bun 1.3 looks mime types up case sensitively and serves IMG.JPG as
+    // octet-stream. read before the move, so a name bun rejects leaves no file behind
+    const mimeType = Bun.file(`file${tempFile.extension}`).type;
 
     await moveFile(tempFile.path, destinationPath);
     await this.removeTemporaryFile(tempFile.id, true);
-
-    const bunFile = Bun.file(destinationPath);
 
     return db
       .insert(files)
@@ -433,7 +420,7 @@ class FileManager {
         originalName: tempFile.originalName,
         userId: owner.userId,
         pluginId: owner.pluginId,
-        mimeType: bunFile?.type || 'application/octet-stream',
+        mimeType: mimeType || 'application/octet-stream',
         createdAt: Date.now()
       })
       .returning()
