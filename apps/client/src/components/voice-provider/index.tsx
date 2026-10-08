@@ -79,6 +79,7 @@ import { useTransportStats } from './hooks/use-transport-stats';
 import { useTransports } from './hooks/use-transports';
 import { useVoiceControls } from './hooks/use-voice-controls';
 import { useVoiceEvents } from './hooks/use-voice-events';
+import { useVoiceSessionRecovery } from './hooks/use-voice-session-recovery';
 import { SIMULCAST_WEBCAM_MAX_BITRATE } from './statics';
 import { VoiceStatsContext } from './stats-context';
 import { VolumeControlProvider } from './volume-control-context';
@@ -1272,6 +1273,8 @@ const VoiceProvider = memo(({ children }: TVoiceProviderProps) => {
       connectionStatus === ConnectionStatus.CONNECTING ||
       connectionStatus === ConnectionStatus.CONNECTED
   });
+
+  useVoiceSessionRecovery({ init, cleanup });
 
   const previousConnectionStatus = useRef(connectionStatus);
 

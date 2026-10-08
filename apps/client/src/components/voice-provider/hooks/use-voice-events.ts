@@ -1,4 +1,5 @@
 import { useCurrentVoiceChannelId } from '@/features/server/channels/hooks';
+import { useIsConnected } from '@/features/server/hooks';
 import { useOwnUserId } from '@/features/server/users/hooks';
 import {
   logVoice,
@@ -44,8 +45,15 @@ const useVoiceEvents = ({
 }: TEvents) => {
   const currentVoiceChannelId = useCurrentVoiceChannelId();
   const ownUserId = useOwnUserId();
+  const connected = useIsConnected();
 
   useEffect(() => {
+    // a reconnect replaces the trpc client, the subscriptions of the old one are dead
+    if (!connected) {
+      logVoice('events: not subscribed, not connected');
+      return;
+    }
+
     if (!currentVoiceChannelId) {
       logVoice('events: not subscribed, no voice channel');
       return;
@@ -188,6 +196,7 @@ const useVoiceEvents = ({
       onVoiceRemoveExternalStreamSub.unsubscribe();
     };
   }, [
+    connected,
     currentVoiceChannelId,
     ownUserId,
     consume,

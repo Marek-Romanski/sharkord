@@ -21,11 +21,12 @@ import { channelUserCan } from '../db/queries/channels';
 import { getUserRoles } from '../db/queries/roles';
 import { getUserById, getUserByToken } from '../db/queries/users';
 import { getWsInfo } from '../helpers/get-ws-info';
+import { removeUserFromVoice } from '../helpers/remove-user-from-voice';
+import { getVoiceSessionOwner } from '../helpers/voice-session-owners';
 import { logger } from '../logger';
 import { eventBus } from '../plugins/event-bus';
 import { enqueueActivityLog } from '../queues/activity-log';
 import { appRouter } from '../routers';
-import { VoiceRuntime } from '../runtimes/voice';
 import { invariant } from './invariant';
 import { pubsub } from './pubsub';
 import type { Context } from './trpc';
@@ -200,6 +201,17 @@ const createContext = async ({
   };
 };
 
+// a failure here must not skip the presence cleanup that follows
+const removeVoiceSessionOnClose = async (userId: number) => {
+  try {
+    await removeUserFromVoice(userId);
+  } catch (error) {
+    logger.error(
+      `Error occurred while removing user ${userId} from voice: ${getErrorMessage(error)}`
+    );
+  }
+};
+
 const handleSocketClose = async (ws: WebSocket) => {
   try {
     const userId = ws.userId;
@@ -211,6 +223,13 @@ const handleSocketClose = async (ws: WebSocket) => {
 
     untrackUserSocket(userId, ws);
 
+    // after a network change the old socket stays half open until its ping times out, by
+    // then the client has reconnected on a new one. the voice session must not outlive the
+    // socket that owns it, even though the user is still online through the new socket
+    if (getVoiceSessionOwner(userId) === ws) {
+      await removeVoiceSessionOnClose(userId);
+    }
+
     // only mark as offline when there are no other active sessions
     if (userSockets.has(userId)) {
       return;
@@ -220,16 +239,7 @@ const handleSocketClose = async (ws: WebSocket) => {
 
     if (!user) return;
 
-    const voiceRuntime = VoiceRuntime.findRuntimeByUserId(user.id);
-
-    if (voiceRuntime) {
-      voiceRuntime.removeUser(user.id);
-
-      pubsub.publish(ServerEvents.USER_LEAVE_VOICE, {
-        channelId: voiceRuntime.id,
-        userId: user.id
-      });
-    }
+    await removeVoiceSessionOnClose(user.id);
 
     usersIpMap.delete(user.id);
     pubsub.publish(ServerEvents.USER_LEAVE, user.id);

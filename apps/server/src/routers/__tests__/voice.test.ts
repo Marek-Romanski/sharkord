@@ -5,9 +5,9 @@ import {
   ServerEvents,
   StreamKind
 } from '@sharkord/shared';
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { and, eq } from 'drizzle-orm';
-import { initTest } from '../../__tests__/helpers';
+import { createFakeSocket, initTest } from '../../__tests__/helpers';
 import { tdb } from '../../__tests__/setup';
 import { config } from '../../config';
 import {
@@ -15,6 +15,10 @@ import {
   rolePermissions,
   roles
 } from '../../db/schema';
+import {
+  getVoiceSessionOwner,
+  setVoiceSessionOwner
+} from '../../helpers/voice-session-owners';
 import { VoiceRuntime } from '../../runtimes/voice';
 import { pubsub } from '../../utils/pubsub';
 
@@ -918,6 +922,267 @@ describe('voice producer subscriptions', () => {
       expect(received).toEqual([]);
     } finally {
       subscription.unsubscribe();
+    }
+  });
+});
+
+describe('voice join after a reconnect', () => {
+  const joinInput = {
+    channelId: VOICE_CHANNEL_ID,
+    state: { micMuted: false, soundMuted: false }
+  };
+
+  const trackVoiceEvents = () => {
+    const events: string[] = [];
+
+    const subscriptions = [
+      pubsub.subscribe(ServerEvents.USER_LEAVE_VOICE).subscribe({
+        next: ({ channelId, userId }) =>
+          events.push(`leave:${channelId}:${userId}`)
+      }),
+      pubsub.subscribe(ServerEvents.USER_JOIN_VOICE).subscribe({
+        next: ({ channelId, userId }) =>
+          events.push(`join:${channelId}:${userId}`)
+      })
+    ];
+
+    return {
+      events,
+      stop: () =>
+        subscriptions.forEach((subscription) => subscription.unsubscribe())
+    };
+  };
+
+  test('should take over a session in the same channel and announce the leave before the join', async () => {
+    const runtime = new VoiceRuntime(VOICE_CHANNEL_ID);
+
+    await runtime.init();
+
+    runtime.addUser(2, { micMuted: false, soundMuted: false });
+    setVoiceSessionOwner(2, createFakeSocket());
+
+    const newSocket = createFakeSocket();
+    const { caller } = await initTest(2, { socket: newSocket });
+    const { events, stop } = trackVoiceEvents();
+
+    try {
+      const result = await caller.voice.join(joinInput);
+
+      expect(result.routerRtpCapabilities).toBeDefined();
+
+      // the client being taken over has to learn it lost the session
+      expect(events).toEqual([
+        `leave:${VOICE_CHANNEL_ID}:2`,
+        `join:${VOICE_CHANNEL_ID}:2`
+      ]);
+      expect(runtime.getUser(2)).toBeDefined();
+      expect(getVoiceSessionOwner(2)).toBe(newSocket);
+    } finally {
+      stop();
+      await runtime.destroy();
+    }
+  });
+
+  test('should announce a leave from the old channel when the takeover moves to another channel', async () => {
+    const oldRuntime = new VoiceRuntime(PRIVATE_VOICE_CHANNEL_ID);
+    const targetRuntime = new VoiceRuntime(VOICE_CHANNEL_ID);
+
+    await targetRuntime.init();
+
+    oldRuntime.addUser(2, { micMuted: false, soundMuted: false });
+    setVoiceSessionOwner(2, createFakeSocket());
+
+    const { caller } = await initTest(2, { socket: createFakeSocket() });
+    const { events, stop } = trackVoiceEvents();
+
+    try {
+      await caller.voice.join(joinInput);
+
+      expect(events).toEqual([
+        `leave:${PRIVATE_VOICE_CHANNEL_ID}:2`,
+        `join:${VOICE_CHANNEL_ID}:2`
+      ]);
+      expect(oldRuntime.getUser(2)).toBeUndefined();
+      expect(targetRuntime.getUser(2)).toBeDefined();
+    } finally {
+      stop();
+      await oldRuntime.destroy();
+      await targetRuntime.destroy();
+    }
+  });
+
+  test('should keep the old session when the runtime has no router yet', async () => {
+    const oldRuntime = new VoiceRuntime(PRIVATE_VOICE_CHANNEL_ID);
+    const targetRuntime = new VoiceRuntime(VOICE_CHANNEL_ID);
+    const oldSocket = createFakeSocket();
+
+    oldRuntime.addUser(2, { micMuted: false, soundMuted: false });
+    setVoiceSessionOwner(2, oldSocket);
+
+    const { caller } = await initTest(2, { socket: createFakeSocket() });
+
+    try {
+      await expect(caller.voice.join(joinInput)).rejects.toThrow(
+        'Router not initialized yet'
+      );
+
+      expect(oldRuntime.getUser(2)).toBeDefined();
+      expect(targetRuntime.getUser(2)).toBeUndefined();
+      expect(getVoiceSessionOwner(2)).toBe(oldSocket);
+    } finally {
+      await oldRuntime.destroy();
+      await targetRuntime.destroy();
+    }
+  });
+
+  test('should keep the old session when the takeover cannot complete', async () => {
+    const oldRuntime = new VoiceRuntime(PRIVATE_VOICE_CHANNEL_ID);
+    const oldSocket = createFakeSocket();
+
+    oldRuntime.addUser(2, { micMuted: false, soundMuted: false });
+    setVoiceSessionOwner(2, oldSocket);
+
+    const { caller } = await initTest(2, { socket: createFakeSocket() });
+
+    try {
+      // channel 2 has no runtime in this test
+      await expect(caller.voice.join(joinInput)).rejects.toThrow(
+        'Voice runtime not found for this channel'
+      );
+
+      expect(oldRuntime.getUser(2)).toBeDefined();
+      expect(getVoiceSessionOwner(2)).toBe(oldSocket);
+    } finally {
+      await oldRuntime.destroy();
+    }
+  });
+
+  test('should not let a connection use a session that no longer exists', async () => {
+    const runtime = new VoiceRuntime(VOICE_CHANNEL_ID);
+
+    // the user joined and left from another connection, so nobody owns the session and
+    // the user is not in the runtime, but this context still carries the channel
+    const { caller: staleCaller } = await initTest(
+      2,
+      { socket: createFakeSocket() },
+      { currentVoiceChannelId: VOICE_CHANNEL_ID }
+    );
+
+    try {
+      await expect(staleCaller.voice.getProducers()).rejects.toThrow(
+        'User is not in a voice channel'
+      );
+    } finally {
+      await runtime.destroy();
+    }
+  });
+
+  test('should still refuse a second join from the connection that owns the session', async () => {
+    const runtime = new VoiceRuntime(VOICE_CHANNEL_ID);
+
+    runtime.addUser(2, { micMuted: false, soundMuted: false });
+
+    const socket = createFakeSocket();
+
+    setVoiceSessionOwner(2, socket);
+
+    const { caller } = await initTest(2, { socket });
+
+    try {
+      await expect(caller.voice.join(joinInput)).rejects.toThrow(
+        'User already in a voice channel'
+      );
+
+      expect(runtime.getUser(2)).toBeDefined();
+    } finally {
+      await runtime.destroy();
+    }
+  });
+
+  test('should not let a connection that lost the session leave it', async () => {
+    const runtime = new VoiceRuntime(VOICE_CHANNEL_ID);
+    const currentSocket = createFakeSocket();
+
+    runtime.addUser(2, { micMuted: false, soundMuted: false });
+    setVoiceSessionOwner(2, currentSocket);
+
+    const { caller: staleCaller } = await initTest(
+      2,
+      { socket: createFakeSocket() },
+      { currentVoiceChannelId: VOICE_CHANNEL_ID }
+    );
+
+    try {
+      await expect(staleCaller.voice.leave()).rejects.toThrow(
+        'User is not in a voice channel'
+      );
+
+      expect(runtime.getUser(2)).toBeDefined();
+      expect(getVoiceSessionOwner(2)).toBe(currentSocket);
+    } finally {
+      await runtime.destroy();
+    }
+  });
+
+  test('should ignore a producer close from a connection that lost the session', async () => {
+    const runtime = new VoiceRuntime(VOICE_CHANNEL_ID);
+    const currentSocket = createFakeSocket();
+    const staleSocket = createFakeSocket();
+
+    runtime.addUser(2, { micMuted: false, soundMuted: false });
+    setVoiceSessionOwner(2, currentSocket);
+
+    spyOn(runtime, 'getProducer').mockReturnValue({} as never);
+
+    const removeProducer = spyOn(runtime, 'removeProducer').mockReturnValue(
+      undefined as never
+    );
+
+    const { caller: staleCaller } = await initTest(
+      2,
+      { socket: staleSocket },
+      { currentVoiceChannelId: VOICE_CHANNEL_ID }
+    );
+
+    const { caller: currentCaller } = await initTest(
+      2,
+      { socket: currentSocket },
+      { currentVoiceChannelId: VOICE_CHANNEL_ID }
+    );
+
+    try {
+      await staleCaller.voice.closeProducer({ kind: StreamKind.AUDIO });
+
+      expect(removeProducer).not.toHaveBeenCalled();
+
+      await currentCaller.voice.closeProducer({ kind: StreamKind.AUDIO });
+
+      expect(removeProducer).toHaveBeenCalledTimes(1);
+    } finally {
+      await runtime.destroy();
+    }
+  });
+
+  test('should forget the session owner when the user leaves', async () => {
+    const runtime = new VoiceRuntime(VOICE_CHANNEL_ID);
+    const socket = createFakeSocket();
+
+    runtime.addUser(2, { micMuted: false, soundMuted: false });
+    setVoiceSessionOwner(2, socket);
+
+    const { caller } = await initTest(
+      2,
+      { socket },
+      { currentVoiceChannelId: VOICE_CHANNEL_ID }
+    );
+
+    try {
+      await caller.voice.leave();
+
+      expect(runtime.getUser(2)).toBeUndefined();
+      expect(getVoiceSessionOwner(2)).toBeUndefined();
+    } finally {
+      await runtime.destroy();
     }
   });
 });

@@ -1,5 +1,6 @@
 import { Permission, ServerEvents, StreamKind } from '@sharkord/shared';
 import z from 'zod';
+import { hasLostVoiceSession } from '../../helpers/voice-session-owners';
 import { logger } from '../../logger';
 import { VoiceRuntime } from '../../runtimes/voice';
 import { invariant } from '../../utils/invariant';
@@ -17,6 +18,15 @@ const closeProducerRoute = protectedProcedure
     if (!ctx.currentVoiceChannelId) {
       logger.debug(
         'Ignoring closeProducer for %s/%s: user already left voice',
+        ctx.user.name,
+        input.kind
+      );
+      return;
+    }
+
+    if (hasLostVoiceSession(ctx.user.id, ctx.getOwnWs())) {
+      logger.debug(
+        'Ignoring closeProducer for %s/%s: session belongs to a newer connection',
         ctx.user.name,
         input.kind
       );

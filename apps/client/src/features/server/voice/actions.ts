@@ -52,7 +52,12 @@ export const addUserToVoiceChannel = (
   }
 };
 
-const clearLocalVoiceSession = (): void => {
+// the channel a join is in flight for. joining from another connection of the same user takes
+// the session over, and the server then announces the old session leaving. that event is
+// about the session being replaced, not about the call being joined
+let joiningChannelId: number | undefined;
+
+export const clearLocalVoiceSession = (): void => {
   const state = store.getState();
 
   const selectedChannelId = selectedChannelIdSelector(state);
@@ -83,6 +88,8 @@ export const removeUserFromVoiceChannel = (
   store.dispatch(
     serverSliceActions.removeUserFromVoiceChannel({ userId, channelId })
   );
+
+  if (userId === ownUserId && channelId === joiningChannelId) return;
 
   if (channelId !== currentChannelId) return;
 
@@ -206,6 +213,7 @@ export const joinVoice = async (
   }
 
   setCurrentVoiceChannelId(channelId);
+  joiningChannelId = channelId;
 
   const { micMuted, soundMuted } = ownVoiceStateSelector(state);
 
@@ -227,6 +235,8 @@ export const joinVoice = async (
     clearLocalVoiceSession();
 
     toast.error(getTrpcError(error, i18n.t('common:failedJoinVoiceChannel')));
+  } finally {
+    joiningChannelId = undefined;
   }
 
   return undefined;

@@ -10,10 +10,15 @@ import { z } from 'zod';
 import { config } from '../../config';
 import { db } from '../../db';
 import { channels } from '../../db/schema';
+import { removeUserFromVoice } from '../../helpers/remove-user-from-voice';
 import {
   consumeVoiceMoveGrant,
   hasVoiceMoveGrant
 } from '../../helpers/voice-move-grants';
+import {
+  hasLostVoiceSession,
+  setVoiceSessionOwner
+} from '../../helpers/voice-session-owners';
 import { logger } from '../../logger';
 import { pluginManager } from '../../plugins';
 import { runHook } from '../../plugins/run-hook';
@@ -70,11 +75,19 @@ const joinVoiceRoute = rateLimitedProcedure(protectedProcedure, {
       message: 'Cannot join a direct message channel as a voice channel'
     });
 
+    const ownWs = ctx.getOwnWs();
+
+    // the session belongs to another connection of this user. mostly an old one, the client
+    // already reconnected after a network change but the old socket has not timed out yet.
+    // it can also be a second open tab or device. either way the newest join wins, so take
+    // the session over instead of refusing
+    const isTakeover = hasLostVoiceSession(ctx.user.id, ownWs);
+
     const userAlreadyInVoiceChannel = VoiceRuntime.findRuntimeByUserId(
       ctx.user.id
     );
 
-    invariant(!userAlreadyInVoiceChannel, {
+    invariant(!userAlreadyInVoiceChannel || isTakeover, {
       code: 'BAD_REQUEST',
       message: 'User already in a voice channel'
     });
@@ -95,6 +108,12 @@ const joinVoiceRoute = rateLimitedProcedure(protectedProcedure, {
       message: 'Voice runtime not found for this channel'
     });
 
+    // before anything changes: a runtime without a router would leave the user in neither
+    // the old session nor the new one
+    const router = runtime.getRouter();
+
+    if (isTakeover) await removeUserFromVoice(ctx.user.id);
+
     runtime.addUser(ctx.user.id, input.state);
 
     if (movedByModerator) consumeVoiceMoveGrant(ctx.user.id);
@@ -102,6 +121,9 @@ const joinVoiceRoute = rateLimitedProcedure(protectedProcedure, {
     const state = runtime.getUserState(ctx.user.id);
 
     ctx.currentVoiceChannelId = channel.id;
+
+    if (ownWs) setVoiceSessionOwner(ctx.user.id, ownWs);
+
     ctx.pubsub.publish(ServerEvents.USER_JOIN_VOICE, {
       channelId: input.channelId,
       userId: ctx.user.id,
@@ -109,8 +131,6 @@ const joinVoiceRoute = rateLimitedProcedure(protectedProcedure, {
     });
 
     logger.info('%s joined voice channel %s', ctx.user.name, channel.name);
-
-    const router = runtime.getRouter();
 
     return {
       routerRtpCapabilities: router.rtpCapabilities
